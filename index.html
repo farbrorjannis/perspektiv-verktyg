@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark">
+  <title>Perspektivverktyg</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, sans-serif;
+      display: grid; grid-template-columns: 320px 1fr; min-height: 100vh;
+      background: var(--bg, #fff); color: var(--fg, #0c0c0c);
+    }
+    aside { padding: 16px; border-right: 1px solid #ccc; }
+    main { position: relative; min-height: 60vh; }
+    /* Vit bakgrund som fallback ifall skript blockeras i en viss inbäddning */
+    #canvas { width: 100%; height: 100%; display: block; background:#fff; }
+
+    .toolbar label { display:block; margin: 10px 0 4px; font-weight: 600; }
+    .toolbar .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button, select, input { padding: 6px 10px; border-radius: 8px; border: 1px solid #bbb; background: transparent; color: inherit; }
+    button { cursor: pointer; }
+    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top: 4px; }
+    .chip { padding:4px 8px; border:1px solid #bbb; border-radius:999px; cursor:pointer; user-select:none; }
+    .chip.active { background:#0077ff22; border-color:#0077ff; color:#003a99; }
+    .legend { font-size: 12px; color: #666; margin-top: 8px; }
+    .divider { height: 1px; background: #ddd; margin: 12px 0; }
+
+    /* High-contrast tema */
+    .hc { --bg: #111; --fg: #f2f2f2; }
+
+    @media (max-width: 900px) {
+      body { grid-template-columns: 1fr; }
+      aside { border-right: none; border-bottom: 1px solid #ccc; }
+      main { height: 70vh; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1 style="margin:0 0 8px 0;">Perspektivverktyg</h1>
+    <p style="margin-top:0;color:#555">Dra flyktpunkter (VP) och horisontlinje (HL). Växla 1–3 punkt, exportera PNG.</p>
+
+    <div class="toolbar" role="region" aria-label="Verktygsfält">
+      <label>Perspektivtyp</label>
+      <div class="chips" id="modeChips" role="tablist" aria-label="Perspektivläge">
+        <div class="chip active" data-mode="1" role="tab" aria-selected="true">1‑punkt</div>
+        <div class="chip" data-mode="2" role="tab" aria-selected="false">2‑punkt</div>
+        <div class="chip" data-mode="3" role="tab" aria-selected="false">3‑punkt</div>
+      </div>
+
+      <label for="density">Rutnätsdensitet</label>
+      <div class="row">
+        <input id="density" type="range" min="4" max="40" value="12" />
+        <span id="densityVal" aria-live="polite">12</span>
+      </div>
+
+      <label for="gridType">Rutnät</label>
+      <select id="gridType" aria-label="Välj rutnätstyp">
+        <option value="none">Inget</option>
+        <option value="rays">Strålar</option>
+        <option value="tiles" selected>Plattor</option>
+      </select>
+
+      <label for="showHorizon" class="row" style="margin-top:8px;">
+        <input id="showHorizon" type="checkbox" checked />
+        Visa horisontlinje
+      </label>
+
+      <label for="thickness">Linjebredd</label>
+      <div class="row">
+        <input id="thickness" type="range" min="0.5" max="3" step="0.5" value="1" />
+        <span id="thicknessVal" aria-live="polite">1</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="row" style="gap:10px;">
+        <button id="resetBtn" title="Återställ allt">Återställ</button>
+        <button id="exportBtn" title="Ladda ner som PNG">Exportera PNG</button>
+        <button id="contrastBtn" title="Hög kontrast av/på">Hög kontrast</button>
+      </div>
+
+      <p class="legend">
+        • Dra <strong>flyktpunkter</strong> (VP1/VP2/VP3)<br/>
+        • Dra <strong>horisontlinjen</strong> (HL) vertikalt<br/>
+        • Håll <strong>Shift</strong> för finjustering<br/>
+        • <strong>Tab</strong> + piltangenter för tangentbordsstyrning, <strong>+</strong>/<strong>−</strong> ändrar densitet
+      </p>
+    </div>
+  </aside>
+
+  <main>
+    <canvas id="canvas" aria-label="Rityta för perspektiv"></canvas>
+  </main>
+
+  <script>
+    // --- Canvas (Retina) ---
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = Math.max(800, Math.floor(rect.width));
+      const cssH = Math.max(600, Math.floor(window.innerHeight * 0.9));
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
+      canvas.style.width = cssW + 'px';
+      canvas.style.height = cssH + 'px';
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.scale(dpr, dpr);
+      draw();
+    }
+    window.addEventListener('resize', resize);
+
+    // --- State ---
+    const state = {
+      mode: 1,
+      density: 12,
+      thickness: 1,
+      gridType: 'tiles',
+      showHorizon: true,
+      horizonY: 0.45,
+      vps: [
+        { x: 0.5, y: 0.45 },
+        { x: 0.85, y: 0.45 },
+        { x: 0.5, y: 0.15 },
+      ],
+      dragging: null,
+      focusIndex: 0,
+      bg: '#ffffff',
+      fg: '#0c0c0c',
+      accent: '#0a66ff',
+      highContrast: false,
+    };
+
+    function setTheme() {
+      document.body.classList.toggle('hc', state.highContrast);
+      state.bg = state.highContrast ? '#111' : '#fff';
+      state.fg = state.highContrast ? '#f2f2f2' : '#0c0c0c';
+      state.accent = state.highContrast ? '#76b7ff' : '#0a66ff';
+      draw();
+    }
+
+    // --- UI ---
+    const chips = document.querySelectorAll('.chip');
+    chips.forEach(chip => chip.addEventListener('click', () => {
+      chips.forEach(c => { c.classList.remove('active'); c.setAttribute('aria-selected', 'false'); });
+      chip.classList.add('active');
+      chip.setAttribute('aria-selected', 'true');
+      state.mode = parseInt(chip.dataset.mode, 10);
+      draw();
+    }));
+
+    const density = document.getElementById('density');
+    const densityVal = document.getElementById('densityVal');
+    density.addEventListener('input', () => {
+      state.density = parseInt(density.value, 10);
+      densityVal.textContent = density.value;
+      draw();
+    });
+    densityVal.textContent = density.value;
+
+    const gridType = document.getElementById('gridType');
+    gridType.addEventListener('change', () => { state.gridType = gridType.value; draw(); });
+
+    const showHorizon = document.getElementById('showHorizon');
+    showHorizon.addEventListener('change', () => { state.showHorizon = showHorizon.checked; draw(); });
+
+    const thickness = document.getElementById('thickness');
+    const thicknessVal = document.getElementById('thicknessVal');
+    thickness.addEventListener('input', () => {
+      state.thickness = parseFloat(thickness.value);
+      thicknessVal.textContent = thickness.value;
+      draw();
+    });
+    thicknessVal.textContent = thickness.value;
+
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      state.mode = 1;
+      chips.forEach(c => c.classList.toggle('active', c.dataset.mode === '1'));
+      chips.forEach(c => c.setAttribute('aria-selected', c.dataset.mode === '1' ? 'true' : 'false'));
+      state.density = 12; density.value = 12; densityVal.textContent = 12;
+      state.thickness = 1; thickness.value = 1; thicknessVal.textContent = 1;
+      state.gridType = 'tiles'; gridType.value = 'tiles';
+      state.showHorizon = true; showHorizon.checked = true;
+      state.horizonY = 0.45;
+      state.vps = [{x:0.5,y:0.45},{x:0.85,y:0.45},{x:0.5,y:0.15}];
+      draw();
+    });
+
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      const link = document.createElement('a');
+      const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+      link.download = `perspektiv_${state.mode}p_${ts}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    document.getElementById('contrastBtn').addEventListener('click', () => {
+      state.highContrast = !state.highContrast;
+      setTheme();
+    });
+
+    // --- Helpers ---
+    function size() {
+      return { w: parseFloat(canvas.style.width) || canvas.width, h: parseFloat(canvas.style.height) || canvas.height };
+    }
+    function vpPx(i){ const { w, h } = size(); return { x: state.vps[i].x * w, y: state.vps[i].y * h }; }
+    function line(p1,p2){ return {x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y}; }
+    function intersect(l1, l2){
+      const {x1,y1,x2,y2} = l1; const {x1:x3,y1:y3,x2:x4,y2:y4} = l2;
+      const den = (x1-x2)*(y3-y4)-(y1-y2)*(x3-x4);
+      if (Math.abs(den) < 1e-6) return null;
+      const ix = ((x1*y2 - y1*x2)*(x3-x4) - (x1-x2)*(x3*y4 - y3*x4)) / den;
+      const iy = ((x1*y2 - y1*x2)*(y3-y4) - (y1-y2)*(x3*y4 - y3*x4)) / den;
+      return {x:ix,y:iy};
+    }
+
+    function drawTiles(vpA, vpB, rows, cols){
+      const { w, h } = size();
+      const cx = w/2, cy = h/2;
+      const halfW = w*0.35, halfH = h*0.25;
+      const left = cx - halfW, right = cx + halfW, top = cy - halfH, bottom = cy + halfH;
+
+      ctx.strokeStyle = '#8888'; ctx.lineWidth = state.thickness;
+
+      for(let i=0;i<=cols;i++){
+        const t = i/cols;
+        const topPt = {x: left + (right-left)*t, y: top};
+        const botPt = {x: left + (right-left)*t, y: bottom};
+        const topI = intersect(line(topPt, vpB), line({x:left,y:top},{x:left,y:bottom})) ?? topPt;
+        const botI = intersect(line(botPt, vpB), line({x:right,y:top},{x:right,y:bottom})) ?? botPt;
+        ctx.beginPath(); ctx.moveTo(topI.x, topI.y); ctx.lineTo(botI.x, botI.y); ctx.stroke();
+      }
+
+      for(let j=0;j<=rows;j++){
+        const t = j/rows;
+        const lPt = {x: left, y: top + (bottom-top)*t};
+        const rPt = {x: right, y: top + (bottom-top)*t};
+        const leftI  = intersect(line(lPt, vpA), line({x:left,y:top}, {x:right,y:top})) ?? lPt;
+        const rightI = intersect(line(rPt, vpA), line({x:left,y:bottom}, {x:right,y:bottom})) ?? rPt;
+        ctx.beginPath(); ctx.moveTo(leftI.x, leftI.y); ctx.lineTo(rightI.x, rightI.y); ctx.stroke();
+      }
+    }
+
+    function drawRays(vp, count){
+      ctx.strokeStyle = '#8888'; ctx.lineWidth = state.thickness;
+      const far = 5000;
+      for(let i=0;i<count;i++){
+        const t = (i/(count-1))*2*Math.PI;
+        const dx = Math.cos(t), dy = Math.sin(t);
+        const p2 = {x: vp.x + dx*far, y: vp.y + dy*far};
+        ctx.beginPath(); ctx.moveTo(vp.x, vp.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      }
+    }
+
+    // --- Draw ---
+    function draw(){
+      const { w, h } = size();
+      ctx.fillStyle = state.bg; ctx.fillRect(0,0,w,h);
+
+      const horizonYpx = state.horizonY * h;
+      const VP1 = vpPx(0); VP1.y = horizonYpx;
+      const VP2 = vpPx(1); VP2.y = horizonYpx;
+      const VP3 = vpPx(2);
+
+      if(state.gridType !== 'none'){
+        if(state.mode === 1){
+          if(state.gridType === 'rays') drawRays(VP1, Math.max(12, state.density*2));
+          else drawTiles(VP1, {x: w*1.5, y: horizonYpx}, state.density, state.density);
+        } else if(state.mode === 2){
+          if(state.gridType === 'rays'){
+            drawRays(VP1, Math.max(8, state.density));
+            drawRays(VP2, Math.max(8, state.density));
+          } else {
+            drawTiles(VP1, VP2, state.density, state.density);
+          }
+        } else {
+          drawTiles(VP1, VP2, state.density, state.density);
+          ctx.strokeStyle = '#8888'; ctx.lineWidth = state.thickness;
+          for(let j=0;j<=state.density;j++){
+            const t = j/state.density;
+            const x = w*0.2 + (w*0.6)*t;
+            ctx.beginPath(); ctx.moveTo(VP3.x, VP3.y);
+            ctx.lineTo(x, h*0.85);
+            ctx.stroke();
+          }
+        }
+      }
+
+      if(state.showHorizon){
+        ctx.strokeStyle = '#c44'; ctx.lineWidth = Math.max(1.5, state.thickness);
+        ctx.setLineDash([8,6]);
+        ctx.beginPath(); ctx.moveTo(0, horizonYpx); ctx.lineTo(w, horizonYpx); ctx.stroke();
+        ctx.setLineDash([]);
+        labelPoint({x:14, y: horizonYpx-8}, 'HL');
+      }
+
+      drawVP(VP1, 'VP1', state.focusIndex===1);
+      if(state.mode >= 2) drawVP(VP2, 'VP2', state.focusIndex===2);
+      if(state.mode >= 3) drawVP(VP3, 'VP3', state.focusIndex===3);
+
+      ctx.fillStyle = state.fg === '#0c0c0c' ? '#444' : '#ddd';
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.fillText(`Läge: ${state.mode}-punkt • Densitet: ${state.density} • Linjebredd: ${state.thickness}`, 12, 20);
+    }
+
+    function drawVP(p, label, focused=false){
+      ctx.fillStyle = state.accent;
+      ctx.strokeStyle = '#0037ad';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, focused?8:6, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      labelPoint({x: p.x+10, y: p.y-10}, label);
+    }
+    function labelPoint(p, text){
+      ctx.fillStyle = state.fg;
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.fillText(text, p.x, p.y);
+    }
+
+    // --- Interaktion ---
+    function hitTest(x,y){
+      const { w, h } = size();
+      const horizonYpx = state.horizonY * h;
+      const VP1 = vpPx(0); VP1.y = horizonYpx;
+      const VP2 = vpPx(1); VP2.y = horizonYpx;
+      const VP3 = vpPx(2);
+      const pts = [{type:'horizon', x: w/2, y: horizonYpx},
+                   {type:'vp1', ...VP1},
+                   ...(state.mode>=2 ? [{type:'vp2', ...VP2}] : []),
+                   ...(state.mode>=3 ? [{type:'vp3', ...VP3}] : [])];
+
+      if(Math.abs(y - horizonYpx) < 8) return {type:'horizon'};
+      for(const p of pts){
+        if(p.type==='horizon') continue;
+        const d2 = (x-p.x)*(x-p.x) + (y-p.y)*(y-p.y);
+        if(d2 < 14*14) return {type: p.type};
+      }
+      return null;
+    }
+
+    canvas.addEventListener('pointerdown', (e)=>{
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left; const y = e.clientY - rect.top;
+      const hit = hitTest(x,y);
+      if(hit){ state.dragging = hit.type; }
+    });
+    canvas.addEventListener('pointermove', (e)=>{
+      if(!state.dragging) return;
+      const rect = canvas.getBoundingClientRect();
+      const { w, h } = size();
+      let x = e.clientX - rect.left; let y = e.clientY - rect.top;
+      if(state.dragging === 'horizon'){
+        state.horizonY = Math.min(0.95, Math.max(0.05, y/h));
+      } else if(state.dragging === 'vp1'){
+        state.vps[0].x = Math.min(2, Math.max(-1, x/w));
+        state.vps[0].y = state.horizonY;
+      } else if(state.dragging === 'vp2'){
+        state.vps[1].x = Math.min(2, Math.max(-1, x/w));
+        state.vps[1].y = state.horizonY;
+      } else if(state.dragging === 'vp3'){
+        state.vps[2].x = Math.min(1.5, Math.max(-0.5, x/w));
+        state.vps[2].y = Math.min(1.5, Math.max(-0.5, y/h));
+      }
+      draw();
+    });
+    canvas.addEventListener('pointerup', ()=> state.dragging = null);
+    canvas.addEventListener('pointerleave', ()=> state.dragging = null);
+
+    function cycleFocus(dir) { state.focusIndex = (state.focusIndex + dir + 4) % 4; draw(); }
+    window.addEventListener('keydown', (e)=>{
+      const step = e.shiftKey ? 0.0025 : 0.01;
+      if(e.key === 'Tab'){ e.preventDefault(); cycleFocus(e.shiftKey ? -1 : 1); }
+      const idx = state.focusIndex;
+      if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){
+        e.preventDefault();
+        if(idx===0){
+          if(e.key==='ArrowUp') state.horizonY = Math.max(0.02, state.horizonY - step);
+          if(e.key==='ArrowDown') state.horizonY = Math.min(0.98, state.horizonY + step);
+        } else {
+          const i = idx-1;
+          if(e.key==='ArrowLeft') state.vps[i].x -= step;
+          if(e.key==='ArrowRight') state.vps[i].x += step;
+          if(idx===3){
+            if(e.key==='ArrowUp') state.vps[2].y -= step;
+            if(e.key==='ArrowDown') state.vps[2].y += step;
+          } else {
+            state.vps[i].y = state.horizonY;
+          }
+        }
+        draw();
+      }
+      if(e.key==='+'){ state.density = Math.min(40, state.density+1); density.value = state.density; densityVal.textContent = state.density; draw(); }
+      if(e.key==='-'){ state.density = Math.max(4, state.density-1); density.value = state.density; densityVal.textContent = state.density; draw(); }
+    });
+
+    // init
+    resize();
+    setTheme();
+  </script>
+</body>
+</html>
