@@ -1,0 +1,16 @@
+# Byt ut repo-namnet om du valde något annat
+REPO=perspektiv-verktyg
+
+# Skapa en lokal mapp
+mkdir "$REPO" && cd "$REPO"
+
+# Skapa index.html och README.md enligt koden nedan (t.ex. copy-paste i editor)
+# ... spara filerna ...
+
+git init
+git add .
+git commit -m "Lägg till perspektiv-verktyg (vanilla)"
+gh repo create farbrorjannis/$REPO --public --source=. --remote=origin --push
+
+# Aktivera Pages i webben:
+# GitHub → repo → Settings → Pages → Source: "Deploy from a branch", Branch: main, / (root)
